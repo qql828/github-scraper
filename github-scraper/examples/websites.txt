@@ -1,0 +1,8 @@
+# 网站URL示例文件
+# 每行一个URL，以#开头的行将被忽略
+
+https://www.python.org
+https://www.github.com
+https://www.microsoft.com
+https://www.google.com
+https://www.stackoverflow.com 

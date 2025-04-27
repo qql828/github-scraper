@@ -1,0 +1,6 @@
+# GitHub仓库URL示例文件
+# 每行一个URL，以#开头的行将被忽略
+
+https://github.com/microsoft/vscode
+https://github.com/python/cpython
+https://github.com/tensorflow/tensorflow 
