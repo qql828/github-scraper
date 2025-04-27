@@ -273,19 +273,16 @@ class GitHubScraper(BaseScraper):
     
     def _parse_count(self, count_text: str) -> int:
         """
-        解析数量文本（例如 '1.2k'）
+        解析计数文本，如"1.2k"转为1200
         
         Args:
-            count_text: 数量文本
+            count_text: 计数文本
             
         Returns:
-            int: 解析后的数值
+            int: 解析后的整数
         """
         try:
-            # 移除非数字字符（保留小数点）
-            count_text = ''.join(c for c in count_text if c.isdigit() or c == '.')
-            
-            # 解析k, m等单位
+            count_text = count_text.strip()
             if 'k' in count_text.lower():
                 return int(float(count_text.lower().replace('k', '')) * 1000)
             elif 'm' in count_text.lower():
@@ -294,6 +291,67 @@ class GitHubScraper(BaseScraper):
                 return int(float(count_text))
         except (ValueError, TypeError):
             return 0
+    
+    def _process_large_text_fields(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        处理可能包含大量文本的字段，避免Excel文件和飞书表格超出大小限制
+        
+        Args:
+            data: 仓库数据列表
+            
+        Returns:
+            List[Dict[str, Any]]: 处理后的数据列表
+        """
+        # Excel单元格大小限制约为32,767字符
+        # 飞书单元格大小限制为50,000字节
+        max_excel_chars = 30000  # 为安全起见，设置为30,000字符
+        max_feishu_bytes = 45000  # 为安全起见，设置为45,000字节
+        
+        processed_data = []
+        for repo in data:
+            processed_repo = repo.copy()
+            
+            # 处理readme字段
+            if 'readme' in processed_repo and processed_repo['readme']:
+                readme = processed_repo['readme']
+                if isinstance(readme, str):
+                    # 检查字符长度(Excel限制)
+                    if len(readme) > max_excel_chars:
+                        truncated = readme[:max_excel_chars]
+                        processed_repo['readme'] = truncated + "\n... (由于长度限制，内容已截断)"
+                        logger.info(f"README已截断为{max_excel_chars}字符，原始长度: {len(readme)}字符")
+                    
+                    # 检查字节大小(飞书限制)
+                    byte_size = len(readme.encode('utf-8'))
+                    if byte_size > max_feishu_bytes:
+                        truncated = readme
+                        while len(truncated.encode('utf-8')) > max_feishu_bytes:
+                            truncated = truncated[:int(len(truncated)*0.9)]  # 每次截断10%
+                        processed_repo['readme'] = truncated + "\n... (由于大小限制，内容已截断)"
+                        logger.info(f"README已截断为适合飞书表格大小，原始大小: {byte_size}字节")
+            
+            # 处理description字段
+            if 'description' in processed_repo and processed_repo['description']:
+                desc = processed_repo['description']
+                if isinstance(desc, str):
+                    # 检查字符长度(Excel限制)
+                    if len(desc) > max_excel_chars:
+                        truncated = desc[:max_excel_chars]
+                        processed_repo['description'] = truncated + "... (由于长度限制，内容已截断)"
+                        logger.info(f"描述已截断为{max_excel_chars}字符，原始长度: {len(desc)}字符")
+                    
+                    # 检查字节大小(飞书限制)
+                    byte_size = len(desc.encode('utf-8'))
+                    if byte_size > max_feishu_bytes:
+                        truncated = desc
+                        while len(truncated.encode('utf-8')) > max_feishu_bytes:
+                            truncated = truncated[:int(len(truncated)*0.9)]  # 每次截断10%
+                        processed_repo['description'] = truncated + "... (由于大小限制，内容已截断)"
+                        logger.info(f"描述已截断为适合飞书表格大小，原始大小: {byte_size}字节")
+            
+            processed_data.append(processed_repo)
+        
+        return processed_data
     
     def export_to_excel(self, repo_data: List[Dict[str, Any]], output_file: str = 'github_repos.xlsx') -> str:
         """
@@ -310,10 +368,13 @@ class GitHubScraper(BaseScraper):
             if not repo_data:
                 logger.error("没有数据需要导出到Excel")
                 return ""
+            
+            # 处理大文本字段
+            processed_repo_data = self._process_large_text_fields(repo_data)
                 
             # 打印数据字段以进行调试
             print("\n爬取的GitHub数据字段:")
-            for i, repo in enumerate(repo_data):
+            for i, repo in enumerate(processed_repo_data):
                 print(f"\n仓库 {i+1} ({repo.get('repository_name', 'unknown')}):")
                 for key, value in repo.items():
                     if key == 'readme':
@@ -323,7 +384,7 @@ class GitHubScraper(BaseScraper):
                     print(f"  - {key}: {value_str}")
             
             # 创建DataFrame
-            new_df = pd.DataFrame(repo_data)
+            new_df = pd.DataFrame(processed_repo_data)
             
             # 打印DataFrame信息用于调试
             logger.info(f"待导出数据的DataFrame行数: {len(new_df)}, 列: {list(new_df.columns)}")
@@ -457,9 +518,12 @@ class GitHubScraper(BaseScraper):
             if not repo_data:
                 logger.error("没有数据可以导出到飞书")
                 return False
+            
+            # 处理大文本字段
+            processed_repo_data = self._process_large_text_fields(repo_data)
                 
             # 创建DataFrame
-            df = pd.DataFrame(repo_data)
+            df = pd.DataFrame(processed_repo_data)
             
             # 整理列顺序
             columns = [

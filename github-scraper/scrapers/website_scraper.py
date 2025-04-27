@@ -249,6 +249,51 @@ class WebsiteScraper(BaseScraper):
                 
         return list(contacts)
     
+    def _process_large_text_fields(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        处理可能包含大量文本的字段，避免Excel文件和飞书表格超出大小限制
+        
+        Args:
+            data: 网站数据列表
+            
+        Returns:
+            List[Dict[str, Any]]: 处理后的数据列表
+        """
+        # Excel单元格大小限制约为32,767字符
+        # 飞书单元格大小限制为50,000字节
+        max_excel_chars = 30000  # 为安全起见，设置为30,000字符
+        max_feishu_bytes = 45000  # 为安全起见，设置为45,000字节
+        
+        processed_data = []
+        for website in data:
+            processed_site = website.copy()
+            
+            # 处理大文本字段列表
+            large_text_fields = ['text_content', 'meta_description', 'description', 'content', 'seo_text']
+            
+            for field in large_text_fields:
+                if field in processed_site and processed_site[field]:
+                    text = processed_site[field]
+                    if isinstance(text, str):
+                        # 检查字符长度(Excel限制)
+                        if len(text) > max_excel_chars:
+                            truncated = text[:max_excel_chars]
+                            processed_site[field] = truncated + "\n... (由于长度限制，内容已截断)"
+                            logger.info(f"{field}已截断为{max_excel_chars}字符，原始长度: {len(text)}字符")
+                        
+                        # 检查字节大小(飞书限制)
+                        byte_size = len(text.encode('utf-8'))
+                        if byte_size > max_feishu_bytes:
+                            truncated = text
+                            while len(truncated.encode('utf-8')) > max_feishu_bytes:
+                                truncated = truncated[:int(len(truncated)*0.9)]  # 每次截断10%
+                            processed_site[field] = truncated + "\n... (由于大小限制，内容已截断)"
+                            logger.info(f"{field}已截断为适合飞书表格大小，原始大小: {byte_size}字节")
+            
+            processed_data.append(processed_site)
+        
+        return processed_data
+    
     def export_to_excel(self, website_data: List[Dict[str, Any]], output_file: str = 'websites.xlsx') -> str:
         """
         将爬取结果导出到Excel
@@ -261,19 +306,26 @@ class WebsiteScraper(BaseScraper):
             str: 输出文件路径
         """
         try:
+            if not website_data:
+                logger.error("没有数据需要导出到Excel")
+                return ""
+            
+            # 处理大文本字段
+            processed_website_data = self._process_large_text_fields(website_data)
+                
             # 打印数据字段以进行调试
             print("\n爬取的网站数据字段:")
-            for i, website in enumerate(website_data):
-                print(f"\n网站 {i+1} ({website.get('website_url', 'unknown')}):")
-                for key, value in website.items():
-                    if key in ['main_links', 'contacts']:
+            for i, site in enumerate(processed_website_data):
+                print(f"\n网站 {i+1} ({site.get('website_url', 'unknown')}):")
+                for key, value in site.items():
+                    if key in ['text_content', 'meta_description']:
                         value_str = f"{value[:50]}..." if value else "空"
                     else:
                         value_str = str(value)
                     print(f"  - {key}: {value_str}")
             
             # 创建DataFrame
-            new_df = pd.DataFrame(website_data)
+            new_df = pd.DataFrame(processed_website_data)
             
             # 整理列顺序
             columns = [
@@ -342,9 +394,12 @@ class WebsiteScraper(BaseScraper):
             if not website_data:
                 logger.error("没有数据可以导出到飞书")
                 return False
+            
+            # 处理大文本字段
+            processed_website_data = self._process_large_text_fields(website_data)
                 
             # 创建DataFrame
-            df = pd.DataFrame(website_data)
+            df = pd.DataFrame(processed_website_data)
             
             # 整理列顺序
             columns = [

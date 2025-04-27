@@ -163,6 +163,82 @@ class FeishuManager:
             return True
         return False
     
+    def _truncate_large_fields(self, data: Union[pd.DataFrame, List[Dict], List[List]]) -> Union[pd.DataFrame, List[Dict], List[List]]:
+        """
+        处理超过飞书单元格大小限制的字段
+        
+        Args:
+            data: 要处理的数据
+            
+        Returns:
+            处理后的数据，保证所有字段不超过飞书单元格大小限制
+        """
+        max_bytes = 45000  # 飞书单元格限制为50000字节，留5000字节的安全边界
+        
+        # 对DataFrame进行处理
+        if isinstance(data, pd.DataFrame):
+            for col in data.columns:
+                # 特别关注这些可能包含大量文本的字段
+                if col in ['readme', 'description', 'content', 'text']:
+                    for idx in data.index:
+                        value = data.at[idx, col]
+                        if value and isinstance(value, str):
+                            # 计算字符串的字节大小
+                            byte_size = len(value.encode('utf-8'))
+                            if byte_size > max_bytes:
+                                # 截断字符串，确保截断后的字节大小不超过限制
+                                truncated = value
+                                while len(truncated.encode('utf-8')) > max_bytes:
+                                    truncated = truncated[:int(len(truncated)*0.9)]  # 每次截断10%
+                                # 添加提示信息
+                                truncated = truncated + "\n... (内容已截断，完整内容请查看原始数据)"
+                                data.at[idx, col] = truncated
+                                logger.info(f"字段 {col} 已截断，原始大小: {byte_size} 字节")
+        
+        # 对字典列表进行处理
+        elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+            for item in data:
+                for key, value in item.items():
+                    # 特别关注这些可能包含大量文本的字段
+                    if key in ['readme', 'description', 'content', 'text'] and value and isinstance(value, str):
+                        byte_size = len(value.encode('utf-8'))
+                        if byte_size > max_bytes:
+                            # 截断字符串，确保截断后的字节大小不超过限制
+                            truncated = value
+                            while len(truncated.encode('utf-8')) > max_bytes:
+                                truncated = truncated[:int(len(truncated)*0.9)]  # 每次截断10%
+                            # 添加提示信息
+                            truncated = truncated + "\n... (内容已截断，完整内容请查看原始数据)"
+                            item[key] = truncated
+                            logger.info(f"字段 {key} 已截断，原始大小: {byte_size} 字节")
+        
+        # 对嵌套列表进行处理（更复杂，可能需要知道列的含义）
+        elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+            # 假设第一行是表头
+            headers = data[0] if len(data) > 0 else []
+            for row_idx in range(1, len(data)):
+                row = data[row_idx]
+                for col_idx in range(len(row)):
+                    value = row[col_idx]
+                    # 尝试从表头中获取字段名称
+                    field_name = headers[col_idx] if col_idx < len(headers) else f"column_{col_idx}"
+                    # 如果字段名称是已知的包含大文本的字段，或者值很大
+                    if (field_name in ['readme', 'description', 'content', 'text'] or 
+                        (isinstance(value, str) and len(value.encode('utf-8')) > max_bytes)):
+                        if isinstance(value, str):
+                            byte_size = len(value.encode('utf-8'))
+                            if byte_size > max_bytes:
+                                # 截断字符串
+                                truncated = value
+                                while len(truncated.encode('utf-8')) > max_bytes:
+                                    truncated = truncated[:int(len(truncated)*0.9)]  # 每次截断10%
+                                # 添加提示信息
+                                truncated = truncated + "\n... (内容已截断，完整内容请查看原始数据)"
+                                data[row_idx][col_idx] = truncated
+                                logger.info(f"字段 {field_name} 已截断，原始大小: {byte_size} 字节")
+        
+        return data
+
     def write_to_feishu_sheet(self, spreadsheet_token: str, sheet_id: str, data: Union[pd.DataFrame, List[Dict]], start_cell: str = "A1") -> bool:
         """
         将数据写入飞书电子表格
@@ -177,6 +253,9 @@ class FeishuManager:
             bool: 操作是否成功
         """
         try:
+            # 处理超过飞书单元格大小限制的字段
+            data = self._truncate_large_fields(data)
+            
             # 如果输入是DataFrame，转换为值列表
             if isinstance(data, pd.DataFrame):
                 # 检查是否有重复行，如果有，则去重
@@ -1054,6 +1133,9 @@ class FeishuManager:
             bool: 操作是否成功
         """
         try:
+            # 处理超过飞书单元格大小限制的字段
+            data = self._truncate_large_fields(data)
+            
             # 过滤掉已存在的URL
             filtered_data = []
             
@@ -1141,6 +1223,9 @@ class FeishuManager:
             bool: 操作是否成功
         """
         try:
+            # 处理超过飞书单元格大小限制的字段
+            data = self._truncate_large_fields(data)
+            
             # 过滤掉已存在的URL
             filtered_data = []
             
