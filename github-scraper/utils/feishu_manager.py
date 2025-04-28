@@ -9,6 +9,7 @@ import logging
 from typing import Optional, Dict, List, Tuple, Any, Union
 from dotenv import load_dotenv
 import traceback
+import time  # 添加time模块导入，因为在_write_in_batches方法中使用了time.sleep
 
 # 修改为适合新目录结构的相对导入
 from . import get_logger
@@ -153,12 +154,28 @@ class FeishuManager:
         检查API响应，如果令牌过期则刷新
         
         Args:
-            response: API响应对象
+            response: API响应对象或响应的JSON结果
             
         Returns:
             bool: 是否刷新了令牌
         """
-        if response.status_code == 401 or (response.json().get("code") == 99991663):
+        # 处理传入的是response对象的情况
+        if hasattr(response, 'status_code') and hasattr(response, 'json'):
+            status_code = response.status_code
+            try:
+                response_json = response.json()
+            except:
+                response_json = {}
+        # 处理传入的是已解析的JSON字典的情况
+        elif isinstance(response, dict):
+            status_code = 200  # 默认值
+            response_json = response
+        else:
+            logger.error(f"无法处理的响应类型: {type(response)}")
+            return False
+        
+        # 检查是否需要刷新token
+        if status_code == 401 or response_json.get("code") == 99991663:
             self.tenant_access_token = self._get_tenant_access_token()
             return True
         return False
@@ -173,46 +190,58 @@ class FeishuManager:
         Returns:
             处理后的数据，保证所有字段不超过飞书单元格大小限制
         """
-        max_bytes = 45000  # 飞书单元格限制为50000字节，留5000字节的安全边界
+        # 降低安全限制，更激进地截断内容
+        max_bytes = 30000  # 降低到30000字节，比原来的45000更安全
+        max_cell_size = 25000  # 对于没有明确标记为大文本的字段，如果超过此大小也截断
         
         # 对DataFrame进行处理
         if isinstance(data, pd.DataFrame):
             for col in data.columns:
                 # 特别关注这些可能包含大量文本的字段
-                if col in ['readme', 'description', 'content', 'text']:
-                    for idx in data.index:
-                        value = data.at[idx, col]
-                        if value and isinstance(value, str):
-                            # 计算字符串的字节大小
-                            byte_size = len(value.encode('utf-8'))
-                            if byte_size > max_bytes:
-                                # 截断字符串，确保截断后的字节大小不超过限制
-                                truncated = value
-                                while len(truncated.encode('utf-8')) > max_bytes:
-                                    truncated = truncated[:int(len(truncated)*0.9)]  # 每次截断10%
-                                # 添加提示信息
-                                truncated = truncated + "\n... (内容已截断，完整内容请查看原始数据)"
-                                data.at[idx, col] = truncated
-                                logger.info(f"字段 {col} 已截断，原始大小: {byte_size} 字节")
+                is_large_text_field = col.lower() in ['readme', 'description', 'content', 'text', 'text_content', 
+                                                     'meta_description', 'seo_text', 'main_links', 'contacts']
+                for idx in data.index:
+                    value = data.at[idx, col]
+                    if value and isinstance(value, str):
+                        # 计算字符串的字节大小
+                        byte_size = len(value.encode('utf-8'))
+                        
+                        # 如果是已知的大文本字段，或者任何字段超过最大限制，都进行截断
+                        if (is_large_text_field and byte_size > max_bytes) or byte_size > max_cell_size:
+                            # 截断字符串，确保截断后的字节大小不超过限制
+                            truncated = value
+                            while len(truncated.encode('utf-8')) > max_bytes:
+                                # 更激进的截断：每次减少20%而不是10%
+                                truncated = truncated[:int(len(truncated)*0.8)]
+                            
+                            # 添加提示信息，提示更简短
+                            truncated = truncated + "\n... (内容已截断)"
+                            data.at[idx, col] = truncated
+                            logger.info(f"字段 {col} 已截断，原始大小: {byte_size} 字节，截断后大小: {len(truncated.encode('utf-8'))} 字节")
         
         # 对字典列表进行处理
         elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
             for item in data:
-                for key, value in item.items():
-                    # 特别关注这些可能包含大量文本的字段
-                    if key in ['readme', 'description', 'content', 'text'] and value and isinstance(value, str):
+                for key, value in list(item.items()):  # 使用list()复制键列表，避免在迭代中修改字典
+                    # 检查所有字符串类型字段
+                    if value and isinstance(value, str):
                         byte_size = len(value.encode('utf-8'))
-                        if byte_size > max_bytes:
-                            # 截断字符串，确保截断后的字节大小不超过限制
+                        is_large_text_field = key.lower() in ['readme', 'description', 'content', 'text', 'text_content', 
+                                                           'meta_description', 'seo_text', 'main_links', 'contacts']
+                        
+                        # 如果是已知的大文本字段，或者任何字段超过最大限制，都进行截断
+                        if (is_large_text_field and byte_size > max_bytes) or byte_size > max_cell_size:
+                            # 截断字符串
                             truncated = value
                             while len(truncated.encode('utf-8')) > max_bytes:
-                                truncated = truncated[:int(len(truncated)*0.9)]  # 每次截断10%
+                                truncated = truncated[:int(len(truncated)*0.8)]
+                            
                             # 添加提示信息
-                            truncated = truncated + "\n... (内容已截断，完整内容请查看原始数据)"
+                            truncated = truncated + "\n... (内容已截断)"
                             item[key] = truncated
-                            logger.info(f"字段 {key} 已截断，原始大小: {byte_size} 字节")
+                            logger.info(f"字段 {key} 已截断，原始大小: {byte_size} 字节，截断后大小: {len(truncated.encode('utf-8'))} 字节")
         
-        # 对嵌套列表进行处理（更复杂，可能需要知道列的含义）
+        # 对嵌套列表进行处理
         elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
             # 假设第一行是表头
             headers = data[0] if len(data) > 0 else []
@@ -220,22 +249,25 @@ class FeishuManager:
                 row = data[row_idx]
                 for col_idx in range(len(row)):
                     value = row[col_idx]
-                    # 尝试从表头中获取字段名称
-                    field_name = headers[col_idx] if col_idx < len(headers) else f"column_{col_idx}"
-                    # 如果字段名称是已知的包含大文本的字段，或者值很大
-                    if (field_name in ['readme', 'description', 'content', 'text'] or 
-                        (isinstance(value, str) and len(value.encode('utf-8')) > max_bytes)):
-                        if isinstance(value, str):
-                            byte_size = len(value.encode('utf-8'))
-                            if byte_size > max_bytes:
-                                # 截断字符串
-                                truncated = value
-                                while len(truncated.encode('utf-8')) > max_bytes:
-                                    truncated = truncated[:int(len(truncated)*0.9)]  # 每次截断10%
-                                # 添加提示信息
-                                truncated = truncated + "\n... (内容已截断，完整内容请查看原始数据)"
-                                data[row_idx][col_idx] = truncated
-                                logger.info(f"字段 {field_name} 已截断，原始大小: {byte_size} 字节")
+                    if value and isinstance(value, str):
+                        byte_size = len(value.encode('utf-8'))
+                        
+                        # 尝试从表头中获取字段名称
+                        field_name = headers[col_idx] if col_idx < len(headers) else f"column_{col_idx}"
+                        is_large_text_field = str(field_name).lower() in ['readme', 'description', 'content', 'text', 'text_content', 
+                                                                      'meta_description', 'seo_text', 'main_links', 'contacts']
+                        
+                        # 如果是已知的大文本字段，或者任何字段超过最大限制，都进行截断
+                        if (is_large_text_field and byte_size > max_bytes) or byte_size > max_cell_size:
+                            # 截断字符串
+                            truncated = value
+                            while len(truncated.encode('utf-8')) > max_bytes:
+                                truncated = truncated[:int(len(truncated)*0.8)]
+                            
+                            # 添加提示信息
+                            truncated = truncated + "\n... (内容已截断)"
+                            data[row_idx][col_idx] = truncated
+                            logger.info(f"字段 {field_name} 已截断，原始大小: {byte_size} 字节，截断后大小: {len(truncated.encode('utf-8'))} 字节")
         
         return data
 
@@ -244,249 +276,170 @@ class FeishuManager:
         将数据写入飞书电子表格
         
         Args:
-            spreadsheet_token (str): 电子表格的token，形如"shtcn******"
-            sheet_id (str): 工作表ID，形如"0b******"
-            data (Union[pd.DataFrame, List[Dict]]): 要写入的数据，可以是pandas DataFrame或字典列表
-            start_cell (str, optional): 起始单元格，默认为"A1"
+            spreadsheet_token: 电子表格的token
+            sheet_id: 工作表ID
+            data: 要写入的数据，可以是pandas DataFrame或字典列表
+            start_cell: 起始单元格，默认为A1
             
         Returns:
             bool: 操作是否成功
         """
         try:
-            # 处理超过飞书单元格大小限制的字段
+            # 先进行数据截断处理，确保不超过飞书单元格限制
             data = self._truncate_large_fields(data)
             
-            # 如果输入是DataFrame，转换为值列表
             if isinstance(data, pd.DataFrame):
-                # 检查是否有重复行，如果有，则去重
-                if len(data) > 0:
-                    # 检查是否有repository_url列，如果有则根据它去重
-                    if 'repository_url' in data.columns:
-                        # 先确保URL格式一致
-                        data = self._normalize_url_fields(data, ['repository_url'])
-                        # 根据URL去重，保留第一个出现的记录
-                        data = data.drop_duplicates(subset=['repository_url'], keep='first')
-                    elif 'website_url' in data.columns:
-                        # 先确保URL格式一致
-                        data = self._normalize_url_fields(data, ['website_url'])
-                        # 根据URL去重，保留第一个出现的记录
-                        data = data.drop_duplicates(subset=['website_url'], keep='first')
+                # DataFrame情况
+                headers = list(data.columns)
+                values = []
                 
-                # 获取列名作为表头
-                headers = data.columns.tolist()
-                values = [headers]  # 表头作为第一行
+                # 添加表头
+                values.append(headers)
                 
-                # 将DataFrame数据转换为列表
+                # 添加数据
                 for _, row in data.iterrows():
-                    values.append(row.tolist())
-            else:
-                # 判断data是否为空
-                if not data or len(data) == 0:
-                    logger.error("输入数据为空")
-                    return False
+                    # 再次确保每个单元格不超过限制
+                    row_values = []
+                    for col in headers:
+                        value = row[col]
+                        # 对所有字符串值进行额外检查
+                        if isinstance(value, str) and len(value.encode('utf-8')) > 30000:
+                            # 进行更激进的截断
+                            truncated = value
+                            while len(truncated.encode('utf-8')) > 30000:
+                                truncated = truncated[:int(len(truncated)*0.8)]
+                            value = truncated + "\n... (内容已截断)"
+                            logger.info(f"在写入过程中额外截断字段 {col}，确保安全")
+                        row_values.append(value)
+                    values.append(row_values)
                 
-                # 检查data[0]的类型，确保是字典
-                if isinstance(data[0], dict):
-                    # 如果输入是字典列表，提取所有键作为表头
-                    headers = list(data[0].keys())
-                    values = [headers]  # 表头作为第一行
-                    
-                    # 对字典列表进行去重处理
-                    if len(data) > 0:
-                        # 检查是否有repository_url键，如果有则根据它去重
-                        if 'repository_url' in headers:
-                            # 创建一个集合来存储已处理的URL
-                            processed_urls = set()
-                            deduplicated_data = []
-                            for item in data:
-                                url = item.get('repository_url', '')
-                                if url and url not in processed_urls:
-                                    processed_urls.add(url)
-                                    deduplicated_data.append(item)
-                            data = deduplicated_data
-                        elif 'website_url' in headers:
-                            # 创建一个集合来存储已处理的URL
-                            processed_urls = set()
-                            deduplicated_data = []
-                            for item in data:
-                                url = item.get('website_url', '')
-                                if url and url not in processed_urls:
-                                    processed_urls.add(url)
-                                    deduplicated_data.append(item)
-                            data = deduplicated_data
-                    
-                    # 将字典数据转换为列表
-                    for item in data:
-                        row = [item.get(key, "") for key in headers]
-                        values.append(row)
-                elif isinstance(data[0], list):
-                    # 如果输入是嵌套列表，直接使用
-                    values = data
-                    logger.info(f"处理嵌套列表数据，行数: {len(values)}")
-                else:
-                    # 不支持的数据类型
-                    logger.error(f"不支持的数据类型: {type(data[0])}")
-                    return False
-            
-            # 确定是否需要创建全新的表格
-            create_new_sheet = start_cell.upper() == "A1"
-            
-            # 检查表格是否已存在，且包含数据
-            if not create_new_sheet:
-                # 如果不是从A1开始写入，就是追加到现有数据后面
-                pass
-            else:
-                # 是否先检查表格是否为空
-                check_url = f"{self.sheets_url}{spreadsheet_token}/values/{sheet_id}"
+                # 请求体
+                request_data = {
+                    "valueRange": {
+                        "range": f"{sheet_id}!{start_cell}",
+                        "values": values
+                    }
+                }
+                
+                # 发送请求
+                url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
                 headers = {
-                    "Authorization": f"Bearer {self.tenant_access_token}"
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {self.get_access_token()}'
                 }
                 
-                try:
-                    check_response = requests.get(check_url, headers=headers)
-                    
-                    # 检查是否需要刷新令牌
-                    if self._refresh_token_if_needed(check_response):
-                        headers["Authorization"] = f"Bearer {self.tenant_access_token}"
-                        check_response = requests.get(check_url, headers=headers)
-                    
-                    check_response.raise_for_status()
-                    check_result = check_response.json()
-                    
-                    if check_result.get("code") == 0:
-                        existing_values = check_result.get("data", {}).get("valueRange", {}).get("values", [])
-                        
-                        # 如果表格已有数据且我们要覆盖从A1开始，确保不会覆盖表头
-                        if existing_values and len(existing_values) > 0 and len(existing_values[0]) > 0:
-                            # 表格已有表头和数据
-                            logger.info("表格已有数据，进行追加模式处理")
-                            
-                            # 确保values不会重复已存在的表头
-                            existing_header = existing_values[0]
-                            
-                            # 如果values的第一行和现有表头相同，则只保留数据部分
-                            if len(values) > 1 and len(values[0]) == len(existing_header):
-                                # 通过字符串比较来避免类型不匹配问题
-                                headers_match = all(str(values[0][i]) == str(existing_header[i]) for i in range(len(existing_header)))
-                                
-                                if headers_match:
-                                    logger.info("检测到数据包含与现有表头相同的表头，跳过表头只写入数据")
-                                    values = values[1:]  # 去掉表头，只保留数据
-                                    start_cell = f"A{len(existing_values) + 1}"  # 从最后一行后面开始
-                                else:
-                                    logger.warning("新数据的表头与现有表头不匹配，可能会导致数据混乱")
-                            
-                except Exception as e:
-                    logger.warning(f"检查表格数据时出错: {e}")
-            
-            # 尝试使用批量更新API
-            url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
-            
-            # 确定更新范围
-            if start_cell.upper() == "A1" and values:
-                # 从A1开始写入整个表格
-                range_str = f"{sheet_id}"
-            else:
-                # 从指定单元格开始写入
-                range_str = f"{sheet_id}!{start_cell}"
-            
-            # 构建请求体
-            payload = {
-                "valueRange": {
-                    "range": range_str,
-                    "values": values
-                }
-            }
-            
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.tenant_access_token}"
-            }
-            
-            # 发送请求
-            logger.info(f"发送飞书更新请求: {url}, 范围: {range_str}, 数据行数: {len(values)}")
-            
-            response = requests.put(url, headers=headers, json=payload)
-            
-            # 检查是否需要刷新令牌
-            if self._refresh_token_if_needed(response):
-                # 更新授权头并重试请求
-                headers["Authorization"] = f"Bearer {self.tenant_access_token}"
-                response = requests.put(url, headers=headers, json=payload)
-            
-            response_text = response.text
-            logger.info(f"飞书API响应: {response_text}")
-            
-            # 记录最后一次错误信息，以便在追加方法中使用
-            self.last_error_text = response_text
-            
-            # 如果普通更新API失败，尝试使用批量更新API
-            if response.status_code >= 300 or (response.json().get("code") != 0):
-                logger.warning(f"普通更新API失败，尝试使用批量更新API: {response_text}")
+                logger.info(f"正在写入数据到飞书表格: {url}")
+                response = requests.put(url, headers=headers, json=request_data)
                 
-                # 使用批量更新API
-                batch_url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values_batch_update"
-                batch_payload = {
-                    "valueRanges": [
-                        {
-                            "range": range_str,
-                            "values": values
-                        }
-                    ]
-                }
-                
-                logger.info(f"发送飞书批量更新请求: {batch_url}")
-                logger.info(f"请求头: {headers}")
-                logger.info(f"请求体: {batch_payload}")
-                
-                batch_response = requests.post(batch_url, headers=headers, json=batch_payload)
-                
-                # 检查是否需要刷新令牌
-                if self._refresh_token_if_needed(batch_response):
-                    headers["Authorization"] = f"Bearer {self.tenant_access_token}"
-                    batch_response = requests.post(batch_url, headers=headers, json=batch_payload)
-                
-                batch_response_text = batch_response.text
-                logger.info(f"飞书API响应: {batch_response_text}")
-                
-                # 记录最后一次错误信息，以便在追加方法中使用
-                self.last_error_text = batch_response_text
-                
-                if batch_response.status_code >= 200 and batch_response.status_code < 300:
-                    try:
-                        batch_result = batch_response.json()
-                        if batch_result.get("code") == 0:
-                            logger.info(f"成功写入飞书表格: {spreadsheet_token}/{sheet_id}")
-                            return True
-                        else:
-                            logger.error(f"写入飞书表格失败: {batch_result}")
-                            return False
-                    except Exception as json_error:
-                        logger.error(f"解析批量更新响应JSON时出错: {json_error}, 原始响应: {batch_response_text}")
-                        return False
+                # 检查响应
+                response_json = response.json()
+                if response_json.get("code") == 0:
+                    logger.info(f"成功写入数据到飞书表格: {spreadsheet_token}, 共 {len(values)-1} 行")
+                    return True
                 else:
-                    logger.error(f"批量更新请求失败，状态码: {batch_response.status_code}, 响应: {batch_response_text}")
-                    return False
+                    # 尝试刷新token并重试
+                    if self._refresh_token_if_needed(response_json):
+                        headers['Authorization'] = f'Bearer {self.get_access_token()}'
+                        response = requests.put(url, headers=headers, json=request_data)
+                        response_json = response.json()
+                        
+                        if response_json.get("code") == 0:
+                            logger.info(f"刷新token后成功写入数据到飞书表格: {spreadsheet_token}")
+                            return True
+                    
+                    # 第二次失败，尝试批量API写入
+                    logger.warning(f"使用单一值范围API写入失败，尝试使用批量更新API: {response_json}")
+                    return self._write_with_batch_update(spreadsheet_token, sheet_id, values)
             
-            if response.status_code >= 200 and response.status_code < 300:
-                try:
-                    result = response.json()
-                    if result.get("code") == 0:
-                        logger.info(f"成功写入飞书表格: {spreadsheet_token}/{sheet_id}")
-                        return True
-                    else:
-                        logger.error(f"写入飞书表格失败: {result}")
-                        return False
-                except Exception as json_error:
-                    logger.error(f"解析响应JSON时出错: {json_error}, 原始响应: {response_text}")
-                    return False
+            elif isinstance(data, list):
+                # 字典列表情况
+                if not data:
+                    logger.warning("没有数据需要写入飞书表格")
+                    return True
+                
+                if isinstance(data[0], dict):
+                    # 提取所有键作为表头
+                    headers = list(data[0].keys())
+                    values = [headers]  # 第一行是表头
+                    
+                    # 添加数据行
+                    for item in data:
+                        # 再次确保每个单元格不超过限制
+                        row_values = []
+                        for key in headers:
+                            value = item.get(key, "")
+                            # 对所有字符串值进行额外检查
+                            if isinstance(value, str) and len(value.encode('utf-8')) > 30000:
+                                # 进行更激进的截断
+                                truncated = value
+                                while len(truncated.encode('utf-8')) > 30000:
+                                    truncated = truncated[:int(len(truncated)*0.8)]
+                                value = truncated + "\n... (内容已截断)"
+                                logger.info(f"在写入过程中额外截断字段 {key}，确保安全")
+                            row_values.append(value)
+                        values.append(row_values)
+                else:
+                    # 已经是二维列表
+                    values = data
+                    
+                    # 再次确保每个单元格不超过限制
+                    for i in range(len(values)):
+                        for j in range(len(values[i])):
+                            value = values[i][j]
+                            if isinstance(value, str) and len(value.encode('utf-8')) > 30000:
+                                # 进行更激进的截断
+                                truncated = value
+                                while len(truncated.encode('utf-8')) > 30000:
+                                    truncated = truncated[:int(len(truncated)*0.8)]
+                                values[i][j] = truncated + "\n... (内容已截断)"
+                                field_name = values[0][j] if i > 0 and j < len(values[0]) else f"column_{j}"
+                                logger.info(f"在写入过程中额外截断字段 {field_name}，确保安全")
+                
+                # 请求体
+                request_data = {
+                    "valueRange": {
+                        "range": f"{sheet_id}!{start_cell}",
+                        "values": values
+                    }
+                }
+                
+                # 发送请求
+                url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
+                headers = {
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {self.get_access_token()}'
+                }
+                
+                logger.info(f"正在写入数据到飞书表格: {url}")
+                response = requests.put(url, headers=headers, json=request_data)
+                
+                # 检查响应
+                response_json = response.json()
+                if response_json.get("code") == 0:
+                    logger.info(f"成功写入数据到飞书表格: {spreadsheet_token}, 共 {len(values)-1} 行")
+                    return True
+                else:
+                    # 尝试刷新token并重试
+                    if self._refresh_token_if_needed(response_json):
+                        headers['Authorization'] = f'Bearer {self.get_access_token()}'
+                        response = requests.put(url, headers=headers, json=request_data)
+                        response_json = response.json()
+                        
+                        if response_json.get("code") == 0:
+                            logger.info(f"刷新token后成功写入数据到飞书表格: {spreadsheet_token}")
+                            return True
+                    
+                    # 第二次失败，尝试批量API写入
+                    logger.warning(f"使用单一值范围API写入失败，尝试使用批量更新API: {response_json}")
+                    return self._write_with_batch_update(spreadsheet_token, sheet_id, values)
             else:
-                logger.error(f"请求失败，状态码: {response.status_code}, 响应: {response_text}")
+                logger.error(f"不支持的数据类型: {type(data)}")
                 return False
                 
         except Exception as e:
-            logger.error(f"写入飞书表格时出错: {e}")
-            traceback.print_exc()  # 打印详细的堆栈跟踪
+            logger.error(f"写入飞书表格失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
 
     def read_from_feishu_sheet(self, spreadsheet_token: str, sheet_id: str, cell_range: str = None) -> Optional[pd.DataFrame]:
@@ -1124,10 +1077,10 @@ class FeishuManager:
     
     def append_github_data(self, data: Union[pd.DataFrame, List[Dict]]) -> bool:
         """
-        向飞书表格追加GitHub数据，避免重复URL
+        将GitHub数据追加到飞书电子表格
         
         Args:
-            data: 要追加的数据，可以是DataFrame或字典列表
+            data (Union[pd.DataFrame, List[Dict]]): 要追加的数据，可以是pandas DataFrame或字典列表
             
         Returns:
             bool: 操作是否成功
@@ -1140,59 +1093,74 @@ class FeishuManager:
             filtered_data = []
             
             if isinstance(data, pd.DataFrame):
-                # 如果是DataFrame，逐行检查URL是否存在
+                # 确保repository_url列存在
+                if 'repository_url' not in data.columns:
+                    logger.error("数据中缺少repository_url列，无法进行URL检查")
+                    return False
+                
+                # 检查每一行
                 for _, row in data.iterrows():
-                    if 'repository_url' in row:
-                        url = row['repository_url']
-                        if not self._url_exists_in_sheet(
-                            self.github_spreadsheet_token, 
-                            self.github_sheet_id, 
-                            'repository_url', 
-                            url
-                        ):
-                            filtered_data.append(row.to_dict())
-                
-                # 如果没有新数据需要添加，直接返回成功
-                if not filtered_data:
-                    logger.info("所有GitHub仓库URL已存在，无需添加")
-                    return True
-                
-                # 转换回DataFrame
-                filtered_df = pd.DataFrame(filtered_data)
-                return self.append_to_feishu_sheet(
-                    self.github_spreadsheet_token,
-                    self.github_sheet_id,
-                    filtered_df
-                )
-            
-            elif isinstance(data, list) and data:
-                # 如果是字典列表，逐个检查URL是否存在
+                    url = row['repository_url']
+                    
+                    # 检查URL是否已存在于飞书表格
+                    exists = self._url_exists_in_sheet(
+                        self.github_spreadsheet_token,
+                        self.github_sheet_id,
+                        'repository_url',
+                        url
+                    )
+                    
+                    if exists:
+                        logger.info(f"URL已存在于飞书表格，跳过: {url}")
+                    else:
+                        # 再次处理该行数据，确保单元格大小不超过限制
+                        row_dict = row.to_dict()
+                        processed_row = self._truncate_large_fields([row_dict])[0]
+                        filtered_data.append(processed_row)
+            else:
+                # 字典列表情况
                 for item in data:
-                    if isinstance(item, dict) and 'repository_url' in item:
-                        url = item['repository_url']
-                        if not self._url_exists_in_sheet(
-                            self.github_spreadsheet_token, 
-                            self.github_sheet_id, 
-                            'repository_url', 
-                            url
-                        ):
-                            filtered_data.append(item)
-                
-                # 如果没有新数据需要添加，直接返回成功
-                if not filtered_data:
-                    logger.info("所有GitHub仓库URL已存在，无需添加")
-                    return True
-                
-                return self.append_to_feishu_sheet(
-                    self.github_spreadsheet_token,
-                    self.github_sheet_id,
-                    filtered_data
-                )
+                    if 'repository_url' not in item:
+                        logger.error("数据项中缺少repository_url字段，无法进行URL检查")
+                        continue
+                        
+                    url = item['repository_url']
+                    
+                    # 检查URL是否已存在于飞书表格
+                    exists = self._url_exists_in_sheet(
+                        self.github_spreadsheet_token,
+                        self.github_sheet_id,
+                        'repository_url',
+                        url
+                    )
+                    
+                    if exists:
+                        logger.info(f"URL已存在于飞书表格，跳过: {url}")
+                    else:
+                        # 再次处理该数据项，确保单元格大小不超过限制
+                        processed_item = self._truncate_large_fields([item])[0]
+                        filtered_data.append(processed_item)
             
-            # 无有效数据
-            return False
+            # 如果没有新数据需要追加，直接返回成功
+            if not filtered_data:
+                logger.info("没有新数据需要追加到飞书表格")
+                return True
+            
+            # 进行最终安全检查，确保所有字段大小都在限制范围内
+            final_data = self._truncate_large_fields(filtered_data)
+            
+            # 追加到电子表格
+            result = self.append_to_feishu_sheet(
+                self.github_spreadsheet_token,
+                self.github_sheet_id,
+                final_data
+            )
+            
+            return result
         except Exception as e:
-            logger.error(f"向飞书表格追加GitHub数据时出错: {e}")
+            logger.error(f"追加GitHub数据到飞书失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     def write_website_data(self, data: Union[pd.DataFrame, List[Dict]], start_cell: str = "A1") -> bool:
@@ -1319,4 +1287,192 @@ class FeishuManager:
             return False
         except Exception as e:
             logger.error(f"检查URL是否存在时出错: {e}")
+            return False 
+
+    def _write_with_batch_update(self, spreadsheet_token: str, sheet_id: str, values: List[List]) -> bool:
+        """
+        使用批量更新API写入数据到飞书表格
+        
+        Args:
+            spreadsheet_token: 电子表格的token
+            sheet_id: 工作表ID
+            values: 要写入的数据，二维列表
+            
+        Returns:
+            bool: 操作是否成功
+        """
+        try:
+            # 构建请求
+            url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values_batch_update"
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {self.get_access_token()}'
+            }
+            
+            # 检查每个单元格的大小，进行最终检查
+            for i in range(len(values)):
+                for j in range(len(values[i])):
+                    value = values[i][j]
+                    if isinstance(value, str) and len(value.encode('utf-8')) > 30000:
+                        # 进行极为激进的截断
+                        truncated = value
+                        while len(truncated.encode('utf-8')) > 30000:
+                            truncated = truncated[:int(len(truncated)*0.7)]  # 减少30%
+                        values[i][j] = truncated + "\n... (内容已截断)"
+                        field_name = values[0][j] if i > 0 and j < len(values[0]) else f"column_{j}"
+                        logger.info(f"在批量写入过程中极限截断字段 {field_name}，确保安全")
+            
+            # 构建请求体
+            request_data = {
+                "valueRanges": [
+                    {
+                        "range": f"{sheet_id}!A1",
+                        "values": values
+                    }
+                ]
+            }
+            
+            logger.info(f"正在使用批量更新API写入数据到飞书表格: {url}")
+            response = requests.post(url, headers=headers, json=request_data)
+            
+            # 检查响应
+            response_json = response.json()
+            if response_json.get("code") == 0:
+                logger.info(f"成功使用批量更新API写入数据到飞书表格: {spreadsheet_token}, 共 {len(values)-1} 行")
+                return True
+            else:
+                # 尝试刷新token并重试
+                if self._refresh_token_if_needed(response):
+                    headers['Authorization'] = f'Bearer {self.get_access_token()}'
+                    response = requests.post(url, headers=headers, json=request_data)
+                    response_json = response.json()
+                    
+                    if response_json.get("code") == 0:
+                        logger.info(f"刷新token后成功使用批量更新API写入数据到飞书表格: {spreadsheet_token}")
+                        return True
+                
+                # 尝试分批写入数据
+                logger.warning(f"批量更新API失败，尝试分批写入数据: {response_json}")
+                return self._write_in_batches(spreadsheet_token, sheet_id, values)
+        
+        except Exception as e:
+            logger.error(f"使用批量更新API写入数据失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+    
+    def _write_in_batches(self, spreadsheet_token: str, sheet_id: str, values: List[List]) -> bool:
+        """
+        将数据分批写入飞书表格
+        
+        Args:
+            spreadsheet_token: 电子表格的token
+            sheet_id: 工作表ID
+            values: 要写入的数据，二维列表
+            
+        Returns:
+            bool: 操作是否成功
+        """
+        try:
+            if not values:
+                logger.warning("没有数据需要写入")
+                return True
+            
+            # 分批处理，先写入表头
+            headers = values[0] if values else []
+            success = self._write_single_batch(spreadsheet_token, sheet_id, [headers], "A1")
+            if not success:
+                logger.error("写入表头失败")
+                return False
+            
+            # 分批写入数据，每批50行
+            batch_size = 50
+            for i in range(1, len(values), batch_size):
+                end_idx = min(i + batch_size, len(values))
+                batch = values[i:end_idx]
+                
+                # 为每一批极限截断数据
+                for row_idx in range(len(batch)):
+                    for col_idx in range(len(batch[row_idx])):
+                        value = batch[row_idx][col_idx]
+                        if isinstance(value, str) and len(value.encode('utf-8')) > 20000:
+                            # 进行极限截断
+                            truncated = value
+                            while len(truncated.encode('utf-8')) > 20000:
+                                truncated = truncated[:int(len(truncated)*0.6)]  # 减少40%
+                            batch[row_idx][col_idx] = truncated + "\n... (内容已极限截断)"
+                
+                # 计算起始单元格
+                start_cell = f"A{i+1}"
+                
+                # 写入这一批数据
+                success = self._write_single_batch(spreadsheet_token, sheet_id, batch, start_cell)
+                if not success:
+                    logger.error(f"写入第{i}到{end_idx}行数据失败")
+                    return False
+                
+                # 短暂延迟，避免API限制
+                time.sleep(0.5)
+            
+            logger.info(f"成功分批写入数据到飞书表格: {spreadsheet_token}, 共 {len(values)-1} 行")
+            return True
+            
+        except Exception as e:
+            logger.error(f"分批写入数据失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+    
+    def _write_single_batch(self, spreadsheet_token: str, sheet_id: str, batch: List[List], start_cell: str) -> bool:
+        """
+        写入单批数据到飞书表格
+        
+        Args:
+            spreadsheet_token: 电子表格的token
+            sheet_id: 工作表ID
+            batch: 要写入的数据批次，二维列表
+            start_cell: 起始单元格
+            
+        Returns:
+            bool: 操作是否成功
+        """
+        try:
+            url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {self.get_access_token()}'
+            }
+            
+            request_data = {
+                "valueRange": {
+                    "range": f"{sheet_id}!{start_cell}",
+                    "values": batch
+                }
+            }
+            
+            logger.info(f"正在写入单批数据到飞书表格，起始单元格: {start_cell}, 行数: {len(batch)}")
+            response = requests.put(url, headers=headers, json=request_data)
+            
+            response_json = response.json()
+            if response_json.get("code") == 0:
+                logger.info(f"成功写入单批数据到飞书表格，起始单元格: {start_cell}")
+                return True
+            else:
+                # 尝试刷新token并重试
+                if self._refresh_token_if_needed(response):
+                    headers['Authorization'] = f'Bearer {self.get_access_token()}'
+                    response = requests.put(url, headers=headers, json=request_data)
+                    response_json = response.json()
+                    
+                    if response_json.get("code") == 0:
+                        logger.info(f"刷新token后成功写入单批数据到飞书表格，起始单元格: {start_cell}")
+                        return True
+                
+                logger.error(f"写入单批数据失败，起始单元格: {start_cell}, 错误: {response_json}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"写入单批数据失败，起始单元格: {start_cell}, 错误: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False 

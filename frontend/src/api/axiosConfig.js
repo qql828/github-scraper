@@ -1,7 +1,8 @@
 import axios from 'axios';
+import config from '../config';
 
 // 设置API基础URL
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const API_URL = config.apiBaseUrl || process.env.REACT_APP_API_URL || 'http://localhost:5000';
 axios.defaults.baseURL = API_URL;
 
 // 添加请求拦截器

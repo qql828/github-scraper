@@ -1,6 +1,28 @@
 #!/bin/bash
 # GitHub爬虫工具Docker启动脚本
 
+# 检查docker和docker-compose是否安装
+if ! command -v docker &> /dev/null; then
+    echo "错误: 没有找到docker命令。请安装Docker: https://docs.docker.com/get-docker/"
+    exit 1
+fi
+
+# 检查docker-compose
+if ! command -v docker-compose &> /dev/null; then
+    # 检查是否可以使用docker compose命令（Docker新版本使用）
+    if ! docker compose version &> /dev/null; then
+        echo "错误: 没有找到docker-compose或docker compose命令。"
+        echo "请安装Docker Compose: https://docs.docker.com/compose/install/"
+        echo "或者使用Docker Desktop，它已包含Docker Compose。"
+        exit 1
+    else
+        echo "检测到新版Docker Compose (docker compose)，将使用它替代docker-compose"
+        # 创建docker-compose别名
+        shopt -s expand_aliases
+        alias docker-compose="docker compose"
+    fi
+fi
+
 # 设置脚本执行权限
 chmod +x start-docker.sh
 
@@ -30,6 +52,13 @@ echo "如需配置飞书和GitHub API，请编辑github-scraper/.env文件"
 
 echo "启动Docker服务..."
 docker-compose up -d
+
+if [ $? -ne 0 ]; then
+    echo "错误: 启动Docker服务失败。"
+    echo "如果你使用的是新版Docker，请尝试使用 'docker compose up -d' 命令。"
+    echo "或者安装docker-compose: https://docs.docker.com/compose/install/"
+    exit 1
+fi
 
 echo "==================="
 echo "服务已启动:"
