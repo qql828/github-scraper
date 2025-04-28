@@ -27,7 +27,9 @@ logger = get_logger('api_server')
 
 # 创建 Flask 应用
 app = Flask(__name__, static_folder='frontend/build')
-CORS(app)  # 允许跨域请求
+
+# 配置CORS，允许来自所有前端的请求
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 # 数据文件夹路径
 DATA_DIR = os.path.join(current_dir, 'data')

@@ -13,6 +13,99 @@
 - **Web界面**：用户友好的React前端界面
 - **命令行支持**：支持通过命令行使用所有功能
 
+## Docker部署运行
+
+项目支持使用Docker快速部署，一键启动前端和后端服务。
+
+### 前提条件
+
+- 安装Docker和Docker Compose
+  - [Docker安装指南](https://docs.docker.com/get-docker/)
+  - [Docker Compose安装指南](https://docs.docker.com/compose/install/)
+
+### 使用Docker启动服务
+
+1. **克隆项目**
+   ```bash
+   git clone https://github.com/yourusername/github-scraper.git
+   cd github-scraper
+   ```
+
+2. **一键启动服务**
+
+   **Linux/macOS系统**:
+   ```bash
+   # 添加执行权限
+   chmod +x start-docker.sh
+   # 启动服务
+   ./start-docker.sh
+   ```
+
+   **Windows系统**:
+   ```bash
+   # 启动服务
+   start-docker.bat
+   ```
+
+3. **访问服务**
+   - 前端地址: http://localhost:3000
+   - 后端API地址: http://localhost:5000
+
+4. **查看日志**
+   ```bash
+   docker-compose logs -f
+   ```
+
+5. **停止服务**
+   ```bash
+   docker-compose down
+   ```
+
+### 环境变量配置
+
+如果需要配置飞书API和GitHub API，请编辑`github-scraper/.env`文件：
+
+```
+# API服务器配置
+FLASK_APP=api_server.py
+FLASK_ENV=production
+
+# 飞书API配置
+FEISHU_APP_ID=your_feishu_app_id
+FEISHU_APP_SECRET=your_feishu_app_secret
+FEISHU_GITHUB_SPREADSHEET_TOKEN=your_feishu_spreadsheet_token
+FEISHU_GITHUB_SHEET_ID=your_sheet_id
+FEISHU_WEBSITE_SPREADSHEET_TOKEN=your_feishu_website_token
+FEISHU_WEBSITE_SHEET_ID=your_website_sheet_id
+
+# GitHub API配置
+GITHUB_TOKEN=your_github_token
+```
+
+## 传统部署方式
+
+如果不使用Docker，也可以使用传统方式部署。
+
+### 前提条件
+
+- Python 3.8+
+- Node.js 16+
+- npm 7+
+
+### 启动服务
+
+**Linux/macOS系统**:
+```bash
+./start.sh
+```
+
+**Windows系统**:
+```bash
+start.bat
+```
+
+详细的部署和使用说明，请参考项目文档。
+
 ## 系统架构
 
 该项目分为前端和后端两部分：

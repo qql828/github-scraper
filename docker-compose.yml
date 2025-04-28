@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./github-scraper
+      dockerfile: Dockerfile
+    container_name: github-scraper-backend
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./github-scraper/data:/app/data
+      - ./github-scraper/.env:/app/.env
+    environment:
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    networks:
+      - github-scraper-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: github-scraper-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000
+    restart: unless-stopped
+    networks:
+      - github-scraper-net
+
+networks:
+  github-scraper-net:
+    driver: bridge 
